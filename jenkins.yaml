@@ -1,0 +1,56 @@
+jenkins:
+  systemMessage: "Jenkins configured by Configuration as Code"
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_USER}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "git-creds"
+              username: "${GIT_USER}"
+              password: "${GIT_TOKEN}"
+
+# The Prometheus plugin's defaults are used: metrics at /prometheus/,
+# no authentication on that endpoint (Prometheus scrapes it inside the
+# Docker network).
+
+jobs:
+  - script: |
+      pipelineJob('sample-job') {
+        description('Sample pipeline created by Configuration as Code')
+        definition {
+          cps {
+            sandbox()
+            script('''
+              pipeline {
+                agent any
+                stages {
+                  stage('Hello') {
+                    steps {
+                      echo 'Hello from Jenkins!'
+                      sh 'echo "Build number: $BUILD_NUMBER"'
+                    }
+                  }
+                  stage('Docker check') {
+                    steps {
+                      sh 'docker version'
+                    }
+                  }
+                }
+              }
+            ''')
+          }
+        }
+      }
+      queue('sample-job')

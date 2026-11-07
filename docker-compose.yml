@@ -1,0 +1,128 @@
+services:
+  # ---------------------------------------------------------------- Jenkins
+  jenkins:
+    build: .
+    container_name: jenkins
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"   # remove if you have no inbound agents
+    group_add:
+      - "${DOCKER_GID:-0}"   # group owning /var/run/docker.sock (0 on Docker Desktop)
+    volumes:
+      - jenkins_data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./jenkins.yaml:/var/jenkins_conf/jenkins.yaml:ro
+    environment:
+      - CASC_JENKINS_CONFIG=/var/jenkins_conf/jenkins.yaml
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false -XX:MaxRAMPercentage=75
+      - JENKINS_ADMIN_USER=${JENKINS_ADMIN_USER:-admin}
+      - JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD:?JENKINS_ADMIN_PASSWORD must be set}
+      - GIT_USER=${GIT_USER}
+      - GIT_TOKEN=${GIT_TOKEN:?GIT_TOKEN must be set}
+    # Resource limits make the CPU / memory "% of limit" panels meaningful
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    # Docker's equivalent of liveness + startup probes:
+    #   start_period = startup grace (failures don't count while Jenkins boots)
+    #   test/retries = liveness (container marked "unhealthy" after 5 misses)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    networks: [ci]
+
+  # ------------------------------------------------------- Blackbox exporter
+  # Probes Jenkins from the outside: liveness (TCP), readiness + startup (HTTP)
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: blackbox
+    restart: unless-stopped
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    ports:
+      - "9115:9115"
+    networks: [ci]
+
+  # ---------------------------------------------------------------- cAdvisor
+  # Per-container CPU / memory / network metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    command: ["--docker_only=true", "--housekeeping_interval=15s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      # On Linux hosts you can also add:
+      # - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8081:8080"
+    networks: [ci]
+
+  # -------------------------------------------------------------- Prometheus
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle   # allows: curl -X POST localhost:9090/-/reload
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on: [blackbox, cadvisor]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [ci]
+
+  # ----------------------------------------------------------------- Grafana
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/jenkins-health.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [ci]
+
+networks:
+  ci:
+
+volumes:
+  jenkins_data:
+  prometheus_data:
+  grafana_data:
